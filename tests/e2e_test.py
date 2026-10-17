@@ -14,7 +14,10 @@ Covers the behaviours that matter for a gateway:
 
 Usage:
     python -m mcprelay serve -c config.local.yaml
-    python tests/e2e_test.py --base http://127.0.0.1:8787 --key dev-local-key
+    python tests/e2e_test.py --base http://127.0.0.1:8787
+
+Keys are read from the config file the server is running, so no credential is
+committed to the repo. Override with --key if you need to.
 """
 
 from __future__ import annotations
@@ -198,11 +201,11 @@ async def probe_tools_list(base: str, key: str) -> list[str]:
     return names
 
 
-async def probe_allowlist(base: str, dev_names: list[str]) -> None:
+async def probe_allowlist(base: str, dev_names: list[str], curated_key: str) -> None:
     print("\n=== mcp: curated allow-list enforcement ===")
     url = f"{base}/gateway/curated/mcp"
 
-    async with _client("curated-local-key") as http_client:
+    async with _client(curated_key) as http_client:
         async with streamable_http_client(url, http_client=http_client) as streams:
             async with ClientSession(streams[0], streams[1]) as session:
                 await session.initialize()
@@ -240,9 +243,9 @@ async def probe_allowlist(base: str, dev_names: list[str]) -> None:
                 )
 
 
-async def probe_radar_path(base: str) -> None:
+async def probe_radar_path(base: str, dev_key: str) -> None:
     print("\n=== /radar path ===")
-    async with _client("dev-local-key") as http_client:
+    async with _client(dev_key) as http_client:
         async with streamable_http_client(
             f"{base}/gateway/dev/radar", http_client=http_client
         ) as streams:
@@ -259,17 +262,50 @@ async def probe_radar_path(base: str) -> None:
 # --------------------------------------------------------------------- main
 
 
+def resolve_keys(config_path: str) -> dict[str, str]:
+    """Read gateway API keys out of the config the *server* actually uses.
+
+    Hardcoding a key here would commit a working credential to the repo. The
+    config is gitignored, so reading it keeps real keys out of version control
+    while still letting the test authenticate against a live server.
+    """
+    import os
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from mcprelay.config import GatewayAppConfig  # noqa: PLC0415
+
+    cfg = GatewayAppConfig.load(config_path)
+    return {gid: gw.api_key for gid, gw in cfg.gateways.items()}
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:8787")
-    parser.add_argument("--key", default="dev-local-key")
+    parser.add_argument("--config", default="config.local.yaml")
+    parser.add_argument("--key", default=None,
+                        help="override the dev key read from --config")
     args = parser.parse_args()
 
-    await probe_auth(args.base, args.key)
+    try:
+        keys = resolve_keys(args.config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"cannot read gateway keys from {args.config}: {exc}")
+        print("Start the server first:  python -m mcprelay serve -c config.local.yaml")
+        return 2
+
+    dev_key = args.key or keys.get("dev")
+    curated_key = keys.get("curated")
+    if not dev_key or not curated_key:
+        print(f"config {args.config} is missing a 'dev' and/or 'curated' gateway "
+              f"with an api_key. Pass --key explicitly, or set MCPRELAY_DEV_KEY / "
+              f"MCPRELAY_CURATED_KEY before starting the server.")
+        return 2
+
+    await probe_auth(args.base, dev_key)
     await probe_control_plane(args.base)
-    dev_names = await probe_tools_list(args.base, args.key)
-    await probe_allowlist(args.base, dev_names)
-    await probe_radar_path(args.base)
+    dev_names = await probe_tools_list(args.base, dev_key)
+    await probe_allowlist(args.base, dev_names, curated_key)
+    await probe_radar_path(args.base, dev_key)
 
     failed = [r for r in results if r[0] == FAIL]
     print("\n" + "=" * 72)

@@ -75,7 +75,7 @@ gateways:
 
   dev:
     description: "Local reference servers only. No credentials required."
-    api_key: "${env:MCPRELAY_DEV_KEY:dev-local-key}"
+    api_key: "${env:MCPRELAY_DEV_KEY}"
     upstreams: [filesystem, memory, sequential-thinking]
     tool_filter:
       include:
@@ -86,7 +86,7 @@ gateways:
   # Same upstreams, but with an allow-list and tight description budgets.
   curated:
     description: "Everything except destructive memory operations, short descriptions."
-    api_key: "${env:MCPRELAY_CURATED_KEY:curated-local-key}"
+    api_key: "${env:MCPRELAY_CURATED_KEY}"
     upstreams: [filesystem, memory, sequential-thinking]
     tool_filter:
       include:

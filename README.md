@@ -38,6 +38,11 @@ pip install -r requirements.txt
 ```powershell
 Copy-Item config.example.yaml config.local.yaml
 
+# 0. the example ships NO default keys on purpose - set your own first.
+#    Generate a real one:  python -c "import secrets;print(secrets.token_urlsafe(32))"
+$env:MCPRELAY_DEV_KEY     = "<pick something>"
+$env:MCPRELAY_CURATED_KEY = "<pick something else>"
+
 # 1. check every upstream connects
 python -m mcprelay doctor -c config.local.yaml
 
@@ -47,6 +52,12 @@ python -m mcprelay tools -c config.local.yaml -g dev
 # 3. run it
 python -m mcprelay serve -c config.local.yaml
 ```
+
+Without those variables the config fails to load with a clear error. That is
+deliberate: a committed example carrying a usable default key means anyone who
+clones it inherits a credential that is trivially guessable on any deployment
+you copy it to. `config.local.yaml` is gitignored for the same reason - it is
+where real keys, and real paths, live.
 
 Endpoints come up on `http://127.0.0.1:8787`:
 
@@ -198,14 +209,15 @@ Keys are shown **once**, at creation, and never appear in any listing or in
 
 ## Connecting a client by hand
 
-Every MCP client that speaks Streamable HTTP works:
+Every MCP client that speaks Streamable HTTP works. Substitute the real key
+for whatever you set `MCPRELAY_DEV_KEY` to:
 
 ```jsonc
 {
   "mcpServers": {
     "mcprelay-dev": {
       "url": "http://127.0.0.1:8787/gateway/dev/mcp",
-      "headers": { "X-API-Key": "dev-local-key" }
+      "headers": { "X-API-Key": "<your dev key>" }
     }
   }
 }
@@ -219,7 +231,7 @@ For a stdio-only client, bridge through `mcp-remote`:
     "mcprelay-dev": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "http://127.0.0.1:8787/gateway/dev/mcp",
-               "--header", "X-API-Key: dev-local-key"]
+               "--header", "X-API-Key:<your dev key>"]
     }
   }
 }
@@ -288,7 +300,7 @@ Put negations **first** — a trailing `!github.*` after `*` is unreachable.
 ```yaml
 gateways:
   curated:
-    api_key: "${MCPRELAY_CURATED_KEY:curated-local-key}"
+    api_key: "${MCPRELAY_CURATED_KEY}"
     upstreams: [filesystem, memory, sequential-thinking]
     tools_ttl_seconds: 120        # advertised as ttlMs (SEP-2549)
     cache_scope: private          # 'public' | 'private'
