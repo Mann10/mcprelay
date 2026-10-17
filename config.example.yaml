@@ -1,0 +1,98 @@
+# mcprelay example configuration
+#
+# Secrets are referenced as ${env:VAR} or ${VAR:default}. A reference to a
+# variable that is not set (and has no default) is a hard error, so a typo can
+# never masquerade as an empty credential.
+#
+# Put the WHOLE header value in one env var - `Authorization: "${env:X:}"` -
+# rather than `"Bearer ${env:X:}"`. A bare scheme with no secret is dropped
+# with a warning (see mcprelay/config.py), but whole-value refs are unambiguous.
+#
+#   python -m mcprelay doctor -c config.local.yaml
+#   python -m mcprelay serve  -c config.local.yaml
+
+server:
+  host: 127.0.0.1
+  port: 8787
+  log_level: info
+
+# ---------------------------------------------------------------- upstreams
+# Each key becomes the tool-name prefix: <key>.<tool>
+# Only letters, digits, '_' and '-' are allowed in a key.
+
+upstreams:
+
+  # --- free local reference servers: no account, no key ---
+  # These prove the whole aggregation path with zero credentials.
+
+  filesystem:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${env:MCPRELAY_SANDBOX:C:/Users/Public}"]
+    request_timeout_seconds: 60
+
+  memory:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-memory"]
+
+  sequential-thinking:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+
+  # Second stdio style: a Python reference server launched with uvx.
+  # Requires `uv` on PATH (https://docs.astral.sh/uv/).
+  git:
+    transport: stdio
+    command: uvx
+    args: ["mcp-server-git", "--repository", "${env:MCPRELAY_GIT_REPO:C:/personal/Reverse_engineer}"]
+    request_timeout_seconds: 60
+    enabled: false          # flip on if you have uvx and a repo you want exposed
+
+  # --- hosted providers, free tiers ---
+  # Disabled by default: these URLs change, and each needs a credential.
+  # Enable one, export its credential, then re-run `doctor` to confirm.
+
+  github:
+    transport: streamable-http
+    url: https://api.githubcopilot.com/mcp/
+    headers:
+      Authorization: "${env:GITHUB_AUTHORIZATION:}"
+    request_timeout_seconds: 60
+    enabled: false
+
+  notion:
+    transport: streamable-http
+    url: https://mcp.notion.com/mcp
+    headers:
+      Authorization: "${env:NOTION_AUTHORIZATION:}"
+    enabled: false
+
+  # ----------------------------------------------------------------- gateways
+
+gateways:
+
+  dev:
+    description: "Local reference servers only. No credentials required."
+    api_key: "${env:MCPRELAY_DEV_KEY:dev-local-key}"
+    upstreams: [filesystem, memory, sequential-thinking]
+    tool_filter:
+      include:
+        - "*"
+      description_max_chars: 400
+    tools_ttl_seconds: 300
+
+  # Same upstreams, but with an allow-list and tight description budgets.
+  curated:
+    description: "Everything except destructive memory operations, short descriptions."
+    api_key: "${env:MCPRELAY_CURATED_KEY:curated-local-key}"
+    upstreams: [filesystem, memory, sequential-thinking]
+    tool_filter:
+      include:
+        # First match wins; no match => denied.
+        # So: allow everything except destructive memory operations.
+        - "!memory.delete_*"
+        - "*"
+      description_max_chars: 160
+    tools_ttl_seconds: 120

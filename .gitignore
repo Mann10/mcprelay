@@ -1,0 +1,57 @@
+# --- secrets -------------------------------------------------------------
+# Live gateway API keys. Created by POST /api/v1/gateways and shown ONCE;
+# a key is never recoverable, so this file must never be committed.
+var/gateways.json
+var/gateways.json.*
+
+# Your live config: machine-specific paths, and the place any real credential
+# would end up. Commit config.example.yaml instead.
+config.local.yaml
+config.*.local.yaml
+
+# Editor / agent scratch
+.planning/
+*.bak
+
+# --- runtime output ------------------------------------------------------
+*.log
+var/*.log
+var/*.json.tmp
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# --- test / tooling caches ----------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- editors -------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- os ------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini

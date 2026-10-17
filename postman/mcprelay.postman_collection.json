@@ -1,0 +1,1603 @@
+{
+  "info": {
+    "name": "mcprelay - local MCP gateway",
+    "description": "Control-plane API for mcprelay.\n\nThis collection drives the **REST control plane only** (gateway CRUD + agent\nconfig install). The MCP protocol itself is not REST and cannot be called from\nPostman - use an MCP client (Cursor, Claude Code, OpenCode, ...) against\n``${base_url}/gateway/${active_gateway_id}/mcp`/mcp`.\n\n## Getting started\n\n1. Start the server: `python -m mcprelay serve -c config.local.yaml`\n2. Run **Health check** to confirm it is up.\n3. Run **List Gateways** - note an id, or create one with **Create Gateway**.\n4. **Create Gateway** returns `api_key` **once**. Save it into the\n   `gateway_api_key` environment variable; no endpoint will show it again.\n5. Use **Client Config / Install Client** to wire an agent.\n\n## Variables\n\n| Variable | Default | Meaning |\n|---|---|---|\n| `base_url` | `http://127.0.0.1:8787` | mcprelay base URL |\n| `gateway_id` | `dev` | a gateway declared in the YAML config |\n| `active_gateway_id` | *(empty)* | id returned by Create Gateway |\n| `client_id` | `cursor` | which agent to generate config for |\n| `upstream_key` | `memory` | an upstream declared in the YAML config |\n\n## Notes\n\n- The control plane is **unauthenticated and loopback-bound**. Do not expose it.\n- `install` **writes files**. It defaults to `dry_run: true` - set it to `false`\n  deliberately. Every write backs up the original first.\n- `rotate-key` invalidates the old key immediately. Update every client config\n  that referenced it, or those clients stop working.\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Surface the resolved gateway URL on every response so it is obvious",
+          "// which endpoint produced the result.",
+          "if (pm.collectionVariables.has('active_gateway_id') &&",
+          "    pm.collectionVariables.get('active_gateway_id')) {",
+          "    pm.collectionVariables.set('active_gateway_id',",
+          "        pm.collectionVariables.get('active_gateway_id'));",
+          "} else {",
+          "    pm.collectionVariables.set('active_gateway_id',",
+          "        pm.collectionVariables.get('gateway_id'));",
+          "}",
+          "",
+          "pm.test('base_url is set', function () {",
+          "    pm.expect(pm.collectionVariables.get('base_url')).to.be.a('string').and.not.empty;",
+          "});"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('responds in under 5s', function () {",
+          "    pm.expect(pm.response.responseTime).to.be.below(5000);",
+          "});",
+          "",
+          "pm.test('no HTML error page', function () {",
+          "    pm.expect(pm.response.headers.get('Content-Type') || '').to.not.include('text/html');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8787",
+      "type": "string"
+    },
+    {
+      "key": "active_gateway_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "client_id",
+      "value": "cursor",
+      "type": "string"
+    },
+    {
+      "key": "upstream_key",
+      "value": "memory",
+      "type": "string"
+    },
+    {
+      "key": "gateway_api_key",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "00 Â· Getting started",
+      "description": "Read this first. What mcprelay is, and what this collection can and cannot do.",
+      "item": [
+        {
+          "name": "How to use this collection",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
+            "description": "mcprelay has two distinct surfaces.\n\n**REST control plane** (what this collection calls)\nCreate gateways, inspect upstreams, generate and write agent configs.\n\n**MCP protocol** (what this collection cannot call)\nAn MCP client connects to `{{base_url}}/gateway/<id>/mcp` and speaks JSON-RPC.\nPostman cannot speak that. Use Cursor, Claude Code, OpenCode, VS Code, etc.\n\n### Typical flow\n\n1. **Health check** - is it up?\n2. **List Gateways** - use `dev`, or **Create Gateway** for a new one.\n3. **Create Gateway** - copy `api_key` from the response. Shown once.\n4. **Client Config** - preview what an agent would get.\n5. **Install Client** - write it (`dry_run: false`).\n6. Restart the agent.\n\n### The MCP endpoint for reference\n\n```\n{{base_url}}/gateway/{{active_gateway_id}}/mcp\n```\n\nAuthenticated with `X-API-Key: {{gateway_api_key}}`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "01 Â· Health & diagnostics",
+      "description": "Is the server up, which upstreams are healthy, and how to recover a dead one.",
+      "item": [
+        {
+          "name": "Health check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('has a status field', () => pm.expect(body).to.have.property('status'));",
+                  "pm.test('at least one upstream is ready', () => {",
+                  "    pm.expect(body.upstreams_ready).to.be.above(0);",
+                  "});",
+                  "",
+                  "pm.test('flag any upstream that is not ready', () => {",
+                  "    const bad = Object.entries(body.upstreams || {})",
+                  "        .filter(([, s]) => s.state !== 'ready')",
+                  "        .map(([k, s]) => `${k}: ${s.state} - ${s.last_error || 'no error recorded'}`);",
+                  "    console.log(bad.length ? 'NOT READY:\\n' + bad.join('\\n') : 'all upstreams ready');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
+            "description": "Per-upstream state, tool counts and negotiated protocol versions.\n\n`status` is `ok` when at least one upstream is ready. `environment_healthy`\nwill be `false` until Ghidra/IDA/JADX are configured - irrelevant here, since\nmcprelay does not use them."
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/healthz",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "healthz"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"status\": \"ok\",\n  \"uptime_seconds\": 128.4,\n  \"upstreams_ready\": 3,\n  \"upstreams_total\": 3,\n  \"upstreams\": {\n    \"filesystem\": {\n      \"state\": \"ready\",\n      \"tool_count\": 14,\n      \"protocol_version\": \"2025-11-25\",\n      \"server_name\": \"secure-filesystem-server\",\n      \"connect_attempts\": 1,\n      \"last_error\": null\n    },\n    \"memory\": {\n      \"state\": \"ready\",\n      \"tool_count\": 9,\n      \"protocol_version\": \"2025-11-25\",\n      \"server_name\": \"memory-server\",\n      \"connect_attempts\": 1,\n      \"last_error\": null\n    },\n    \"sequential-thinking\": {\n      \"state\": \"ready\",\n      \"tool_count\": 1,\n      \"protocol_version\": \"2025-11-25\",\n      \"server_name\": \"sequential-thinking-server\",\n      \"connect_attempts\": 1,\n      \"last_error\": null\n    }\n  },\n  \"gateways\": {\n    \"dev\": {\n      \"endpoint\": \"/gateway/dev/mcp\",\n      \"radar_endpoint\": \"/gateway/dev/radar\",\n      \"tools\": 24,\n      \"source\": \"config\"\n    }\n  }\n}"
+              }
+            },
+            {
+              "name": "degraded (an upstream failed)",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/healthz",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "healthz"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"status\": \"degraded\",\n  \"upstreams_ready\": 2,\n  \"upstreams_total\": 3,\n  \"upstreams\": {\n    \"github\": {\n      \"state\": \"degraded\",\n      \"tool_count\": 0,\n      \"protocol_version\": null,\n      \"last_error\": \"MCPError: Server returned an error response\"\n    }\n  }\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "List upstreams",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('upstreams and tools both present', () => {",
+                  "    pm.expect(body).to.have.property('upstreams');",
+                  "    pm.expect(body).to.have.property('tools');",
+                  "});",
+                  "",
+                  "console.log('--- discovered tools per upstream ---');",
+                  "for (const [name, tools] of Object.entries(body.tools || {})) {",
+                  "    console.log(`${name}: ${tools.length} tool(s)`);",
+                  "    tools.slice(0, 6).forEach(t => console.log(`    ${t}`));",
+                  "    if (tools.length > 6) console.log(`    ... and ${tools.length - 6} more`);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/upstreams",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "upstreams"
+              ]
+            },
+            "description": "Health **plus** every tool discovered on each upstream.\n\nThis is where you look when a tool you expected is missing - if the upstream\nis degraded, `tools` for it is empty."
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/upstreams",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "upstreams"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"upstreams\": {\n    \"filesystem\": {\n      \"state\": \"ready\",\n      \"tool_count\": 14,\n      \"protocol_version\": \"2025-11-25\",\n      \"server_name\": \"secure-filesystem-server\",\n      \"connect_attempts\": 1,\n      \"last_error\": null\n    }\n  },\n  \"tools\": {\n    \"filesystem\": [\n      \"filesystem.create_directory\",\n      \"filesystem.directory_tree\",\n      \"filesystem.edit_file\",\n      \"filesystem.get_file_info\",\n      \"filesystem.list_allowed_directories\",\n      \"filesystem.list_directory\",\n      \"filesystem.read_file\",\n      \"filesystem.write_file\"\n    ],\n    \"memory\": [\n      \"memory.add_observations\",\n      \"memory.create_entities\",\n      \"memory.create_relations\",\n      \"memory.delete_entities\",\n      \"memory.read_graph\"\n    ]\n  }\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reconnect an upstream",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 409', function () {",
+                  "    pm.expect([200, 409]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.test('reports the resulting state', () => {",
+                  "        pm.expect(body).to.have.property('state');",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/upstreams/{{upstream_key}}/reconnect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "upstreams",
+                "{{upstream_key}}",
+                "reconnect"
+              ]
+            },
+            "description": "Reconnect one upstream without restarting mcprelay.\n\nUseful when a stdio subprocess died. Responses:\n- `200` - reconnected; check `state` and `tool_count`\n- `404` - no such upstream in the config\n- `409` - the upstream is `enabled: false` in the config"
+          },
+          "response": [
+            {
+              "name": "reconnected",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/upstreams/{{upstream_key}}/reconnect",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "upstreams",
+                    "{{upstream_key}}",
+                    "reconnect"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"key\": \"memory\",\n  \"state\": \"ready\",\n  \"tools\": 9,\n  \"last_error\": null\n}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Â· Gateways",
+      "description": "Create, inspect, filter and delete gateways.",
+      "item": [
+        {
+          "name": "List gateways",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('returns an array', () => {",
+                  "    pm.expect(body.gateways).to.be.an('array').and.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('no api_key anywhere in the response', function () {",
+                  "    const blob = JSON.stringify(body);",
+                  "    pm.expect(blob).to.not.include('mcr_');",
+                  "});",
+                  "",
+                  "// Adopt the first runtime gateway so later requests have a valid id.",
+                  "const runtime = body.gateways.find(g => g.source === 'runtime');",
+                  "if (runtime) {",
+                  "    pm.collectionVariables.set('active_gateway_id', runtime.id);",
+                  "    console.log('adopted existing runtime gateway: ' + runtime.id);",
+                  "}",
+                  "",
+                  "console.log('--- gateways ---');",
+                  "body.gateways.forEach(g => console.log(",
+                  "    `${g.id.padEnd(14)} ${String(g.tool_count).padStart(3)} tools  ${g.source}  ${g.endpoint}`",
+                  "));",
+                  "",
+                  "pm.test('every gateway exposes an mcp endpoint', () => {",
+                  "    body.gateways.forEach(g => pm.expect(g.endpoint).to.match(/^\\/gateway\\/.+\\/mcp$/));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways"
+              ]
+            },
+            "description": "All gateways, merging YAML-declared and runtime-created ones.\n\n`source` is `config` (from the YAML file, read-only at runtime) or `runtime`\n(created via the API, persisted to `var/gateways.json`).\n\nThis response **never** contains an API key. The test script also copies the\nfirst runtime gateway's id into `{{active_gateway_id}}` so later requests work\nwithout you editing anything."
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"gateways\": [\n    {\n      \"id\": \"dev\",\n      \"description\": \"Local reference servers only. No credentials required.\",\n      \"endpoint\": \"/gateway/dev/mcp\",\n      \"radar_endpoint\": \"/gateway/dev/radar\",\n      \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n      \"tool_count\": 24,\n      \"unavailable_upstreams\": [],\n      \"auth\": \"X-API-Key\",\n      \"source\": \"config\"\n    },\n    {\n      \"id\": \"f30a1e56f1e1\",\n      \"description\": \"mcprelay gateway my coding agent\",\n      \"endpoint\": \"/gateway/f30a1e56f1e1/mcp\",\n      \"radar_endpoint\": \"/gateway/f30a1e56f1e1/radar\",\n      \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n      \"tool_count\": 24,\n      \"unavailable_upstreams\": [],\n      \"auth\": \"X-API-Key\",\n      \"source\": \"runtime\"\n    }\n  ]\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('returns an id', function () {",
+                  "    pm.expect(body.id).to.be.a('string').and.have.lengthOf(12);",
+                  "});",
+                  "pm.test('returns an api_key exactly once', function () {",
+                  "    pm.expect(body.api_key).to.be.a('string').and.match(/^mcr_/);",
+                  "});",
+                  "",
+                  "// Hand the new id and key to every later request in this run.",
+                  "pm.collectionVariables.set('active_gateway_id', body.id);",
+                  "pm.collectionVariables.set('gateway_api_key', body.api_key);",
+                  "",
+                  "console.log('='.repeat(60));",
+                  "console.log('GATEWAY CREATED: ' + body.id);",
+                  "console.log('ENDPOINT        : ' + body.endpoint);",
+                  "console.log('API KEY        : ' + body.api_key);",
+                  "console.log('TOOLS          : ' + body.tool_count);",
+                  "console.log('This key is shown ONCE. It is now saved to');",
+                  "console.log(",
+                  "    'the collection variables gateway_api_key / active_gateway_id.');",
+                  "console.log('Rotate with: POST /api/v1/gateways/' + body.id + '/rotate-key');",
+                  "console.log('='.repeat(60));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"my coding agent\",\n  \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n  \"description\": \"mcprelay gateway my coding agent\",\n  \"tool_filter\": [\"*\"],\n  \"description_max_chars\": 400,\n  \"tools_ttl_seconds\": 300,\n  \"radar_enabled\": true\n}"
+            },
+            "description": "Create a gateway. Live immediately - **no restart needed**.\n\n### Body\n\n| Field | Required | Notes |\n|---|---|---|\n| `name` | yes | Becomes the server key in client configs, slugified |\n| `upstreams` | yes | Must exist under `upstreams:` in the YAML config |\n| `description` | no | Defaults to `mcprelay gateway <name>` |\n| `tool_filter` | no | Globs, first match wins, `!` negates, no match = denied |\n| `description_max_chars` | no | Truncates descriptions to bound `tools/list` size |\n| `tools_ttl_seconds` | no | Advertised as `ttlMs` (SEP-2549) |\n| `radar_enabled` | no | Reserved; the `/radar` path is always mounted |\n\n### Restricting the tool set\n\n```json\n\"tool_filter\": [\"!memory.delete_*\", \"*\"]\n```\nNegations go **first** - a trailing `!memory.*` after `*` is unreachable.\n\n### The key\n\n`api_key` is returned **only here**. It is generated in `store.py`\n(256-bit `secrets`), never derived from the name, and is never retrievable\nafterwards. The test script copies it into the collection variables.",
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "created",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"id\": \"f30a1e56f1e1\",\n  \"name\": \"my coding agent\",\n  \"description\": \"mcprelay gateway my coding agent\",\n  \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n  \"created_at\": \"2026-10-16T10:30:00+00:00\",\n  \"created_by\": \"control-plane\",\n  \"endpoint\": \"/gateway/f30a1e56f1e1/mcp\",\n  \"radar_endpoint\": \"/gateway/f30a1e56f1e1/radar\",\n  \"tool_count\": 24,\n  \"api_key\": \"mcr_9CryGi4UClkGYVi4dU2JKdL7nfDRYJiJAq5Bxuiqu_4\",\n  \"api_key_note\": \"shown once; GET /api/v1/gateways never returns it\"\n}"
+              }
+            },
+            {
+              "name": "unknown upstream (400)",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways"
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"error\": \"unknown upstream(s): ghost. Available: filesystem, memory, sequential-thinking\"\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('reports its source', () => {",
+                  "    pm.expect(['config', 'runtime']).to.include(body.source);",
+                  "});",
+                  "pm.test('lists resolved tools', () => {",
+                  "    pm.expect(body.tools).to.be.an('array');",
+                  "});",
+                  "pm.test('no api_key unless explicitly requested', function () {",
+                  "    pm.expect(body).to.not.have.property('api_key');",
+                  "});",
+                  "",
+                  "const namespaced = (body.tools || []).every(n => n.includes('.'));",
+                  "pm.test('every tool is namespaced <upstream>.<tool>', () => {",
+                  "    pm.expect(namespaced).to.be.true;",
+                  "});",
+                  "",
+                  "if (body.unavailable_upstreams && body.unavailable_upstreams.length) {",
+                  "    console.log('WARNING unavailable upstreams: ' +",
+                  "        body.unavailable_upstreams.join(', '));",
+                  "}",
+                  "if (body.denied && body.denied.length) {",
+                  "    console.log('filtered out by allow-list: ' + body.denied.join(', '));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}"
+              ]
+            },
+            "description": "Full detail for one gateway, including the **resolved** tool list after allow-list filtering.\n\nAdd `?include_key=true` to retrieve the key of a **runtime** gateway. Declared\n(config) gateways have no retrievable key - it lives in your YAML.\n\n`denied` lists tools that exist upstream but were filtered out."
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "{{active_gateway_id}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"id\": \"dev\",\n  \"description\": \"Local reference servers only. No credentials required.\",\n  \"endpoint\": \"/gateway/dev/mcp\",\n  \"radar_endpoint\": \"/gateway/dev/radar\",\n  \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n  \"tool_count\": 24,\n  \"tools\": [\n    \"filesystem.create_directory\",\n    \"filesystem.read_file\",\n    \"filesystem.write_file\",\n    \"memory.create_entities\",\n    \"memory.read_graph\",\n    \"sequential-thinking.sequentialthinking\"\n  ],\n  \"unavailable_upstreams\": [],\n  \"denied\": [],\n  \"tool_filter\": [\"*\"],\n  \"source\": \"config\"\n}"
+              }
+            },
+            {
+              "name": "unknown gateway (404)",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/nope",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "nope"
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"error\": \"unknown gateway\",\n  \"id\": \"nope\"\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Gateway tools (merged view)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('count matches the array length', () => {",
+                  "    pm.expect(body.count).to.equal(body.tools.length);",
+                  "});",
+                  "pm.test('every tool is namespaced', () => {",
+                  "    body.tools.forEach(t => pm.expect(t.name).to.include('.'));",
+                  "});",
+                  "",
+                  "console.log(`gateway ${body.gateway}: ${body.count} tool(s)`);",
+                  "if (body.unavailable_upstreams.length) {",
+                  "    console.log('  unavailable: ' + body.unavailable_upstreams.join(', '));",
+                  "}",
+                  "if (body.denied.length) {",
+                  "    console.log('  denied by allow-list: ' + body.denied.join(', '));",
+                  "}",
+                  "console.log('--- tools ---');",
+                  "body.tools.forEach(t =>",
+                  "    console.log('  ' + t.name.padEnd(42) + ' ' + String(t.description || '').slice(0, 60))",
+                  ");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}/tools?full=true",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}",
+                "tools"
+              ],
+              "query": [
+                {
+                  "key": "full",
+                  "value": "true",
+                  "description": "Include full input schemas. Omit for a compact list."
+                }
+              ]
+            },
+            "description": "The exact tool list a client sees, after allow-list filtering.\n\nThis is the same set the MCP endpoint returns in `tools/list`, so if a tool is\nmissing here it is missing for the agent too.\n\nAdd `?full=true` for complete input schemas - useful for hand-writing a call."
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/dev/tools",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "dev",
+                    "tools"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"gateway\": \"dev\",\n  \"count\": 24,\n  \"search_tool\": \"gateway_search_tools\",\n  \"denied\": [],\n  \"unavailable_upstreams\": [],\n  \"tools\": [\n    {\n      \"name\": \"filesystem.read_file\",\n      \"description\": \"[filesystem] Read the complete contents of a file from the file system...\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"path\": { \"type\": \"string\", \"description\": \"Absolute path to the file\" }\n        },\n        \"required\": [\"path\"]\n      }\n    }\n  ]\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Tool choices (for building an allow-list)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('groups tools by upstream', () => {",
+                  "    pm.expect(body.upstreams).to.be.an('object').and.not.empty;",
+                  "});",
+                  "",
+                  "console.log('--- pick tools to allow-list ---');",
+                  "let total = 0;",
+                  "for (const [up, tools] of Object.entries(body.upstreams)) {",
+                  "    total += tools.length;",
+                  "    console.log(`${up} (${tools.length})`);",
+                  "    tools.forEach(t =>",
+                  "        console.log(`  [${t.allowed ? 'x' : ' '}] ${t.name}`)",
+                  "    );",
+                  "}",
+                  "const upstreamCount = Object.keys(body.upstreams).length;",
+                  "console.log(`${total} tool(s) across ${upstreamCount} upstream(s)`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}/tool-choices",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}",
+                "tool-choices"
+              ]
+            },
+            "description": "Every tool an upstream carries, grouped by upstream, each flagged with whether the gateway's current allow-list permits it.\n\nThis is the data a selection UI would consume. Use it to work out which globs\nto pass to **Patch gateway**.\n\nExample: deny the three destructive memory tools and allow the rest\n\n```\n[\"!memory.delete_*\", \"*\"]\n```"
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/dev/tool-choices",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "dev",
+                    "tool-choices"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"gateway\": \"dev\",\n  \"upstreams\": {\n    \"memory\": [\n      {\n        \"name\": \"memory.create_entities\",\n        \"original_name\": \"create_entities\",\n        \"description\": \"Create multiple new entities in the knowledge graph\",\n        \"allowed\": true\n      },\n      {\n        \"name\": \"memory.delete_entities\",\n        \"original_name\": \"delete_entities\",\n        \"description\": \"Delete multiple entities and their associated relations\",\n        \"allowed\": true\n      },\n      {\n        \"name\": \"memory.read_graph\",\n        \"original_name\": \"read_graph\",\n        \"description\": \"Return the entire knowledge graph\",\n        \"allowed\": true\n      }\n    ]\n  }\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patch allow-list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 400', function () {",
+                  "    pm.expect([200, 400]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    console.log('allow-list now: ' +",
+                  "        JSON.stringify(pm.response.json().tool_filter));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tool_filter\": [\"!memory.delete_*\", \"*\"],\n  \"description_max_chars\": 200\n}"
+            },
+            "description": "Change the allow-list or description budget **without recreating the gateway**.\n\nThe endpoint and the key stay the same, so no client config changes are needed.\n\n### Pattern semantics\n\nEvaluated **first-match-wins**, `!` negates. **No match = denied** - there is\nno implicit allow-all, so attaching a new upstream never silently exposes\neverything it carries.\n\n```\n[\"*\"]                                allow everything\n[\"!memory.delete_*\", \"*\"]            everything except memory deletions\n[\"github.*\", \"notion.search\"]        only those\n```\n\nNegations go first. `[\"*\", \"!github.*\"]` does **not** exclude github - `*`\nmatches first and the negation is never reached.\n\nOnly `tool_filter` and `description_max_chars` are mutable.",
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "patched",
+              "originalRequest": {
+                "method": "PATCH",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"gateway\": \"f30a1e56f1e1\",\n  \"id\": \"f30a1e56f1e1\",\n  \"name\": \"my coding agent\",\n  \"upstreams\": [\"filesystem\", \"memory\", \"sequential-thinking\"],\n  \"tool_filter\": [\"!memory.delete_*\", \"*\"],\n  \"description_max_chars\": 200,\n  \"tools_ttl_seconds\": 300,\n  \"radar_enabled\": true,\n  \"created_at\": \"2026-10-16T10:30:00+00:00\",\n  \"created_by\": \"control-plane\"\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rotate key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('issues a new key', () => {",
+                  "    pm.expect(body.api_key).to.match(/^mcr_/);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('gateway_api_key', body.api_key);",
+                  "",
+                  "console.log('='.repeat(60));",
+                  "console.log('KEY ROTATED for ' + body.gateway);",
+                  "console.log('NEW KEY: ' + body.api_key);",
+                  "console.log('The previous key is now INVALID immediately.');",
+                  "console.log('Every client config holding the old key must be');",
+                  "console.log('reinstalled with: POST /api/v1/gateways/' +",
+                  "    body.gateway + '/install/<client>  { \"dry_run\": false }');",
+                  "console.log('='.repeat(60));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}/rotate-key",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}",
+                "rotate-key"
+              ]
+            },
+            "description": "Issue a fresh key. **The previous key stops working immediately** - the auth rule is replaced in place, not on restart.\n\nUse this when a key leaks, or just to be tidy. The response is the only time\nyou will see the new value.\n\n### After rotating\n\nEvery agent configured with the old key now gets `401`. Reinstall their\nconfigs:\n\n```\nPOST /api/v1/gateways/<id>/install/cursor   {\"dry_run\": false}\n```\n\nThen restart those agents."
+          },
+          "response": [
+            {
+              "name": "rotated",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/rotate-key",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "rotate-key"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"gateway\": \"f30a1e56f1e1\",\n  \"api_key\": \"mcr_Xf71nsKx7pQ2mB8vLc4dJhA6RtE1gW0yZi5OuNbMx\",\n  \"note\": \"previous key is now invalid\"\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 409', function () {",
+                  "    pm.expect([200, 409]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 409) {",
+                  "    console.log('protected: ' + pm.response.json().error);",
+                  "} else {",
+                  "    pm.collectionVariables.set('active_gateway_id', '');",
+                  "    console.log('deleted ' + pm.response.json().deleted);",
+                  "    console.log('restart mcprelay to fully unmount the route');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}"
+              ]
+            },
+            "description": "Remove a **runtime** gateway.\n\n- `200` - deleted. The record and its auth rule go immediately, but the Starlette\n  mount and its session manager linger until you restart mcprelay.\n- `409` - this gateway is declared in the YAML config. Remove it from the file\n  instead; runtime deletion is refused so the config stays authoritative.\n\nRun this against `{{active_gateway_id}}`, not `dev`."
+          },
+          "response": [
+            {
+              "name": "deleted",
+              "originalRequest": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"deleted\": \"f30a1e56f1e1\",\n  \"note\": \"process restart needed to unmount cleanly\"\n}"
+              }
+            },
+            {
+              "name": "config-declared gateway is protected (409)",
+              "originalRequest": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/dev",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "dev"
+                  ]
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"error\": \"gateway 'dev' is declared in the config file; remove it there rather than at runtime\"\n}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 - Attach an agent",
+      "description": "Point an AI coding agent at a gateway. Three steps, and the verb tells you the blast radius.\n\n| # | Request | Reads? | Writes? |\n|---|---|---|---|\n| 1 | List supported clients | yes | no |\n| 2 | PREVIEW config | yes | **no** |\n| 3 | WRITE config | yes | **YES - agent config file** |\n\nSteps 2 and 3 take the same `client_id` path parameter, so step 2 is always safe and step 3 is the only one that changes anything.\n\n### Decision tree\n\n```\nNeed to know which agents are supported?   -> 1\nWant to see the JSON before committing?     -> 2\nHappy with it?                              -> 3, then restart the agent\n```\n\n### Which client_id?\n\n`opencode`, `cursor`, `claude_code`, `claude_desktop`, `windsurf`, `vscode`, `generic`. Run step 1 for the current list.\n\n### Claude Desktop is different\n\nIt is stdio-only, so step 3 needs `\"transport\": \"stdio-bridge\"` in the body. That generates an `npx -y mcp-remote` bridge instead of a direct URL. It also has no default config path, so you must supply `target_path` - and quit the app first, or it overwrites your change on exit.",
+      "item": [
+        {
+          "name": "1. List supported clients",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "",
+                  "console.log('--- agents you can target ---');",
+                  "body.clients.forEach(c => {",
+                  "    const path = c.default_path || c.path_hint || '(needs target_path)';",
+                  "    const caps = [",
+                  "        c.supports_http ? 'remote' : null,",
+                  "        c.supports_stdio ? 'stdio' : null",
+                  "    ].filter(Boolean).join(' or ');",
+                  "    console.log(`  ${c.client_id.padEnd(16)} ${caps.padEnd(11)} ${c.format}`);",
+                  "    console.log(`      path: ${path}`);",
+                  "    if (c.notes) console.log(`      note: ${c.notes}`);",
+                  "});",
+                  "",
+                  "// Point step 2/3 at the first agent that needs no target_path.",
+                  "const easy = body.clients.find(c => c.default_path);",
+                  "if (easy) pm.collectionVariables.set('client_id', easy.client_id);",
+                  "",
+                  "console.log('\\nset {{client_id}} = ' +",
+                  "    pm.collectionVariables.get('client_id'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clients",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients"
+              ]
+            },
+            "description": "**Step 1 - reads only.** Which agents mcprelay can generate a config for, the format each expects, and where its config lives.\n\nThe test script prints that as a table and sets `{{client_id}}` to the first agent with a known default path, so steps 2 and 3 usually need no editing.",
+            "descriptionFormat": "markdown"
+          },
+          "response": [
+            {
+              "name": "ok",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/clients",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clients"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"clients\": [\n    {\n      \"client_id\": \"opencode\",\n      \"display_name\": \"OpenCode\",\n      \"format\": \"opencode-mcp\",\n      \"supports_http\": true,\n      \"supports_stdio\": false,\n      \"default_path\": \"C:\\\\Users\\\\you\\\\.config\\\\opencode\\\\opencode.jsonc\",\n      \"notes\": \"Under the top-level 'mcp' key. Reads opencode.jsonc and opencode.json.\"\n    },\n    {\n      \"client_id\": \"cursor\",\n      \"display_name\": \"Cursor\",\n      \"format\": \"mcpServers\",\n      \"supports_http\": true,\n      \"supports_stdio\": false,\n      \"default_path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json\",\n      \"notes\": \"Cursor reads ~/.cursor/mcp.json.\"\n    },\n    {\n      \"client_id\": \"vscode\",\n      \"display_name\": \"VS Code (Continue / Cline)\",\n      \"format\": \"vscode-servers\",\n      \"supports_http\": true,\n      \"supports_stdio\": false,\n      \"default_path\": null,\n      \"path_hint\": \".vscode/mcp.json  or  ~/.continue/config.json\",\n      \"notes\": \"Uses a 'servers' key, not 'mcpServers'.\"\n    },\n    {\n      \"client_id\": \"claude_desktop\",\n      \"display_name\": \"Claude Desktop\",\n      \"format\": \"mcpServers\",\n      \"supports_http\": false,\n      \"supports_stdio\": true,\n      \"default_path\": \"\",\n      \"notes\": \"stdio-only. Needs a real path. Must be fully quit before editing.\"\n    }\n  ]\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. PREVIEW config (safe)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('this request cannot write', function () {",
+                  "    pm.expect(body).to.not.have.property('written');",
+                  "});",
+                  "",
+                  "console.log('='.repeat(62));",
+                  "console.log('PREVIEW ONLY - nothing was written');",
+                  "console.log('='.repeat(62));",
+                  "console.log('agent     : ' + body.display_name);",
+                  "console.log('transport : ' + body.transport);",
+                  "console.log('server key: ' + body.server_key);",
+                  "console.log('would write to: ' +",
+                  "    (body.target_path || '(none - set target_path in step 3)'));",
+                  "if (!body.supported) {",
+                  "    console.log('');",
+                  "    console.log('!! ' + body.reason);",
+                  "}",
+                  "console.log('');",
+                  "console.log(body.config_json);",
+                  "",
+                  "console.log('Happy with it? Run step 3 with the same",
+                  "    client_id and dry_run: false.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}/client-config/{{client_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}",
+                "client-config",
+                "{{client_id}}"
+              ]
+            },
+            "description": "**Step 2 - reads only. Cannot write anything.**\n\nShows the exact JSON an agent would receive, for the gateway and agent you select. Run this as often as you like.\n\nSame `client_id` as step 3, so what you approve here is what step 3 writes.\n\n`supported: false` means that agent cannot use the direct HTTP form - read `reason`. For Claude Desktop, go to step 3 with `\"transport\": \"stdio-bridge\"`.",
+            "descriptionFormat": "markdown"
+          },
+          "response": [
+            {
+              "name": "cursor",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/client-config/cursor",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "client-config",
+                    "cursor"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"cursor\",\n  \"display_name\": \"Cursor\",\n  \"transport\": \"remote\",\n  \"supported\": true,\n  \"reason\": \"\",\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json\",\n  \"notes\": \"Cursor reads ~/.cursor/mcp.json.\",\n  \"config\": {\n    \"mcpServers\": {\n      \"my_coding_agent\": {\n        \"url\": \"http://127.0.0.1:8787/gateway/f30a1e56f1e1/mcp\",\n        \"headers\": {\n          \"X-API-Key\": \"mcr_9CryGi4UClk...\"\n        }\n      }\n    }\n  }\n}"
+              }
+            },
+            {
+              "name": "opencode (different shape)",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/client-config/opencode",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "client-config",
+                    "opencode"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"opencode\",\n  \"display_name\": \"OpenCode\",\n  \"transport\": \"remote\",\n  \"supported\": true,\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": \"C:\\\\Users\\\\you\\\\.config\\\\opencode\\\\opencode.jsonc\",\n  \"config\": {\n    \"mcp\": {\n      \"my_coding_agent\": {\n        \"type\": \"remote\",\n        \"url\": \"http://127.0.0.1:8787/gateway/f30a1e56f1e1/mcp\",\n        \"headers\": {\n          \"X-API-Key\": \"mcr_9CryGi4UClk...\"\n        },\n        \"enabled\": true\n      }\n    }\n  }\n}"
+              }
+            },
+            {
+              "name": "claude_desktop (unsupported for direct http)",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/client-config/claude_desktop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "client-config",
+                    "claude_desktop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"claude_desktop\",\n  \"display_name\": \"Claude Desktop\",\n  \"transport\": \"remote\",\n  \"supported\": false,\n  \"reason\": \"Claude Desktop only speaks stdio; use the mcp-remote bridge form (see --transport stdio-bridge)\",\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": null,\n  \"notes\": \"stdio-only. Needs a real path. Must be fully quit before editing.\"\n}"
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. WRITE config (changes a file)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "",
+                  "if (body.dry_run === true) {",
+                  "    console.log('DRY RUN - nothing written.');",
+                  "    console.log('set \"dry_run\": false and send again to apply.');",
+                  "    return;",
+                  "}",
+                  "",
+                  "console.log('='.repeat(62));",
+                  "console.log('WROTE ' + body.display_name.toUpperCase() + ' CONFIG');",
+                  "console.log('='.repeat(62));",
+                  "console.log('file   : ' + body.path);",
+                  "if (body.created) {",
+                  "    console.log('         (new file, nothing to back up)');",
+                  "} else if (body.backup_path) {",
+                  "    console.log('backup : ' + body.backup_path);",
+                  "}",
+                  "if (body.preserved_top_level_keys && body.preserved_top_level_keys.length) {",
+                  "    console.log('kept   : ' +",
+                  "        body.preserved_top_level_keys.join(', '));",
+                  "}",
+                  "if (body.jsonc_comments_dropped) {",
+                  "    console.log('');",
+                  "    console.log('note: file was JSONC, // comments were stripped.');",
+                  "    console.log('      the backup holds the original.');",
+                  "}",
+                  "console.log('');",
+                  "console.log('NEXT: fully quit and restart ' + body.display_name + '.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/gateways/{{active_gateway_id}}/install/{{client_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gateways",
+                "{{active_gateway_id}}",
+                "install",
+                "{{client_id}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dry_run\": false,\n  \"transport\": \"remote\",\n  \"radar\": false,\n  \"target_path\": null,\n  \"base_url\": null\n}"
+            },
+            "description": "**Step 3 - THE ONLY REQUEST THAT WRITES ANYTHING.**\n\nMerges the config into the agent's own config file, backing it up first.\n\n### Safe because it\n\n- **always backs up** an existing file to `<path>.mcprelay-backup-<UTC timestamp>`\n- **deep-merges** - unrelated keys and other MCP servers survive\n- **replaces** an entry with the same server key instead of duplicating it\n- **handles JSONC** - parses OpenCode's `opencode.jsonc`, and reports `jsonc_comments_dropped` honestly\n- **writes into the file that already exists** - OpenCode reads both `opencode.jsonc` and `opencode.json`, and mcprelay picks the present one rather than creating a competing file\n- **refuses** unparseable files with `400`, leaving them untouched\n\n### Body\n\n| Field | Default | Purpose |\n|---|---|---|\n| `dry_run` | `true` | **Set to `false` to write** |\n| `transport` | `remote` | `stdio-bridge` for stdio-only hosts |\n| `radar` | `false` | Use `/radar` instead of `/mcp` |\n| `target_path` | agent default | Override the destination |\n| `base_url` | bound host | Full MCP URL, for tunnels |\n\nAll nullable - `null` means \"use the default\".\n\n### Suggested first send\n\nLeave `\"dry_run\": true`, confirm the output matches step 2, then flip it to `false`.\n\n### Claude Desktop\n\nUse `\"transport\": \"stdio-bridge\"` and supply `target_path` - it has no default. Quit the app completely first or it will overwrite your change on exit.",
+            "descriptionFormat": "markdown"
+          },
+          "response": [
+            {
+              "name": "written (with backup)",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/install/cursor",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "install",
+                    "cursor"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"cursor\",\n  \"display_name\": \"Cursor\",\n  \"transport\": \"remote\",\n  \"supported\": true,\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json\",\n  \"written\": true,\n  \"path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json\",\n  \"backup_path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json.mcprelay-backup-20261016T111001Z\",\n  \"created\": false,\n  \"preserved_top_level_keys\": [\n    \"$schema\",\n    \"editor\"\n  ],\n  \"jsonc_comments_dropped\": false\n}"
+              }
+            },
+            {
+              "name": "dry run (nothing written)",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/install/cursor",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "install",
+                    "cursor"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"cursor\",\n  \"display_name\": \"Cursor\",\n  \"transport\": \"remote\",\n  \"supported\": true,\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": \"C:\\\\Users\\\\you\\\\.cursor\\\\mcp.json\",\n  \"dry_run\": true,\n  \"written\": false\n}"
+              }
+            },
+            {
+              "name": "no path known for this agent (400)",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/install/vscode",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "install",
+                    "vscode"
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"error\": \"VS Code (Continue / Cline) has no default config path - pass an explicit target_path (see profile notes: Uses a 'servers' key, not 'mcpServers'. Path depends on the extension: .continue/config.json, or a VS Code mcp.json.)\"\n}"
+              }
+            },
+            {
+              "name": "claude_desktop via stdio bridge",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/gateways/f30a1e56f1e1/install/claude_desktop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "gateways",
+                    "f30a1e56f1e1",
+                    "install",
+                    "claude_desktop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"client_id\": \"claude_desktop\",\n  \"display_name\": \"Claude Desktop\",\n  \"transport\": \"stdio-bridge\",\n  \"supported\": true,\n  \"server_key\": \"my_coding_agent\",\n  \"target_path\": null,\n  \"config\": {\n    \"mcpServers\": {\n      \"my_coding_agent\": {\n        \"command\": \"npx\",\n        \"args\": [\n          \"-y\",\n          \"mcp-remote\",\n          \"http://127.0.0.1:8787/gateway/f30a1e56f1e1/mcp\",\n          \"--header\",\n          \"X-API-Key: mcr_9CryGi4UClk...\"\n        ]\n      }\n    }\n  },\n  \"dry_run\": true,\n  \"written\": false\n}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

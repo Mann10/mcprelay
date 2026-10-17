@@ -1,0 +1,10 @@
+# mcprelay runtime dependencies.
+#
+# The MCP SDK is pinned to >=2 because version 1 targets the legacy
+# handshake-era protocol (2025-03-26 / 2025-11-25). mcprelay speaks the modern
+# stateless `2026-07-28` revision.
+mcp>=2.0,<3
+fastapi>=0.110
+uvicorn>=0.27
+httpx2>=2.0
+PyYAML>=6.0
