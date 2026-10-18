@@ -36,21 +36,66 @@ pip install -e .
 
 ## Quick start
 
-One command turns everything on, from any directory (after `pip install -e .`):
+### First launch on a fresh machine
 
-```
+Everything a new user needs, in order:
+
+```powershell
+# 1. prerequisites
+#    Python 3.11+ and Node.js on PATH (the example upstreams run via `npx`).
+#    Optional: uv/uvx if you enable the `git` upstream.
+
+# 2. get the code
+git clone <repo-url> mcprelay
+cd mcprelay
+
+# 3. install - pulls all dependencies AND registers the `mcprelay` command
+pip install -e .
+
+# 4. create your live config (config.local.yaml is gitignored - it holds
+#    real keys and paths; the example ships NO usable keys on purpose)
+Copy-Item config.example.yaml config.local.yaml
+#    Generate keys:  python -c "import secrets;print(secrets.token_urlsafe(32))"
+$env:MCPRELAY_DEV_KEY     = "<pick something>"
+$env:MCPRELAY_CURATED_KEY = "<pick something else>"
+
+# 5. (optional) sanity check upstream connectivity
+mcprelay doctor
+
+# 6. launch - from ANY directory
 mcprelay
 ```
 
-Bare `mcprelay` opens the TUI. If no gateway is running it finds the config
-(working directory first, then the install location), spawns
-`mcprelay serve` detached in the background and attaches — same model as
-opencode. Subcommands stay available: `mcprelay serve`, `doctor`,
-`install --write --for opencode --gateway dev`, …
+Step 6 is the whole product: the TUI opens, finds no running gateway, locates
+the config (current directory first, then the install location), spawns
+`mcprelay serve` detached in the background and attaches to it — the opencode
+model: one command turns everything on.
+
+Know these three behaviors:
+
+- **Quitting the TUI does not stop the gateway.** The server keeps running
+  detached; the next bare `mcprelay` attaches to it in a heartbeat.
+- **First launch can be slow.** Stdio upstreams run via `npx`, which
+  downloads packages on first use; the TUI waits up to 45s for health.
+- **If the TUI reports the gateway never came up**, diagnose directly:
+  `mcprelay doctor -c config.local.yaml`.
+
+Handy variants:
+
+- `mcprelay -c <path>` — use a specific config file
+- `mcprelay --base <url>` — attach to a gateway elsewhere
+- `mcprelay --no-spawn` — attach-only; never start a server
+- `MCPRELAY_URL=http://host:8787` — permanent non-default attach target
+
+If you installed without `-e` (`pip install .` instead), run `mcprelay` from
+the folder containing `config.local.yaml` — only an editable install can find
+the config at the install location.
+
+### The manual, command-by-command way
+
+The same thing without the TUI:
 
 ```powershell
-Copy-Item config.example.yaml config.local.yaml
-
 # 0. the example ships NO default keys on purpose - set your own first.
 #    Generate a real one:  python -c "import secrets;print(secrets.token_urlsafe(32))"
 $env:MCPRELAY_DEV_KEY     = "<pick something>"
