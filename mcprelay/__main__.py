@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from .config import ConfigError, GatewayAppConfig
@@ -453,8 +454,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_config(explicit: str | None) -> str:
+    """Config hunt so one command works from anywhere.
+
+    Order: explicit -c flag, then $MCPRELAY_CONFIG, then the working
+    directory (config.local.yaml preferred over config.yaml), then the
+    directory the package was installed from. A bare ``mcprelay`` typed in
+    another folder therefore still finds the live config and can spawn the
+    gateway itself - the opencode "one command turns everything on" model.
+    """
+    if explicit and explicit != DEFAULT_CONFIG:
+        return explicit
+    env = os.environ.get("MCPRELAY_CONFIG")
+    if env:
+        return env
+
+    candidates: list[Path] = []
+    cwd = Path.cwd()
+    pkg_root = Path(__file__).resolve().parent.parent
+    for root in (cwd, pkg_root):
+        for name in ("config.local.yaml", "config.yaml"):
+            p = root / name
+            if p.is_file() and p not in candidates:
+                candidates.append(p)
+    if candidates:
+        return str(candidates[0])
+    return explicit or DEFAULT_CONFIG
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.config = _resolve_config(args.config)
     try:
         if not hasattr(args, "func"):
             # Bare `mcprelay` with no subcommand: the TUI *is* the product.

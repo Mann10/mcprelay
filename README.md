@@ -25,6 +25,7 @@ mcp client ──X-API-Key──▶ /gateway/dev/mcp        (this project)
 
 ```powershell
 pip install -r requirements.txt
+pip install -e .
 ```
 
 > **Pin note.** `mcp>=2.0` is required. Version 1.x targets the legacy
@@ -34,6 +35,18 @@ pip install -r requirements.txt
 ---
 
 ## Quick start
+
+One command turns everything on, from any directory (after `pip install -e .`):
+
+```
+mcprelay
+```
+
+Bare `mcprelay` opens the TUI. If no gateway is running it finds the config
+(working directory first, then the install location), spawns
+`mcprelay serve` detached in the background and attaches — same model as
+opencode. Subcommands stay available: `mcprelay serve`, `doctor`,
+`install --write --for opencode --gateway dev`, …
 
 ```powershell
 Copy-Item config.example.yaml config.local.yaml
