@@ -95,6 +95,15 @@ class GatewayMcpServer:
             on_call_tool=self._on_call_tool,
         )
 
+    def update_config(self, gateway: GatewayConfig) -> None:
+        """Swap in a fresh gateway definition without remounting.
+
+        Runtime mutations (tool_filter edits via the control plane) mutate the
+        *store*, not this object - without this swap the mounted server would
+        keep serving the filter it was created with until the next restart.
+        """
+        self.gateway = gateway
+
     def _instructions(self) -> str:
         gw = self.gateway
         lines = [gw.description or f"mcprelay gateway {gw.id}"]

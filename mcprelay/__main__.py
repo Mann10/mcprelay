@@ -360,6 +360,20 @@ def _coerce(value: str) -> Any:
     return value
 
 
+# ----------------------------------------------------------------------- tui
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    """Interactive terminal UI. Attaches to a running gateway, or starts one."""
+    from .tui import run as run_tui
+
+    return run_tui(
+        base=args.base,
+        config=args.config,
+        spawn=not args.no_spawn,
+    )
+
+
 # ----------------------------------------------------------------------- main
 
 
@@ -375,7 +389,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local MCP gateway.",
         parents=[common],
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    # No subcommand = the TUI (after the opencode model: one command, UI first).
+    sub = parser.add_subparsers(dest="command")
+
+    p_tui = sub.add_parser("tui", help="open the terminal UI (default)", parents=[common])
+    p_tui.add_argument("--base", default=None,
+                       help="control-plane URL to attach to (default: try, then spawn)")
+    p_tui.add_argument("--no-spawn", action="store_true",
+                       help="attach to a running gateway only; never start one")
+    p_tui.set_defaults(func=cmd_tui)
 
     p_serve = sub.add_parser("serve", help="run the gateway HTTP server", parents=[common])
     p_serve.add_argument("--host", default=None)
@@ -434,6 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if not hasattr(args, "func"):
+            # Bare `mcprelay` with no subcommand: the TUI *is* the product.
+            from .tui import run as run_tui
+
+            return run_tui(config=args.config)
         return int(args.func(args))
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)

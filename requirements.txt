@@ -8,3 +8,4 @@ fastapi>=0.110
 uvicorn>=0.27
 httpx2>=2.0
 PyYAML>=6.0
+textual>=0.80

@@ -24,11 +24,11 @@ from starlette.responses import JSONResponse as StarletteJSONResponse
 
 from . import agentconfig
 from .auth import ApiKeyAuthMiddleware
-from .config import GatewayAppConfig, GatewayConfig, ToolFilterConfig
+from .config import GatewayAppConfig, GatewayConfig, UpstreamConfig, ToolFilterConfig
 from .mcp_server import SEARCH_TOOL_NAME, GatewayMcpServer
 from .naming import match_filter
 from .registry import Registry, UpstreamManager, to_wire_tool
-from .store import GatewayStore, ManagedGateway, StoreError
+from .store import GatewayStore, ManagedGateway, StoreError, UpstreamStore
 
 log = logging.getLogger("mcprelay.app")
 
@@ -114,6 +114,7 @@ def build_app(
     *,
     require_auth: bool = True,
     state_path: str | None = None,
+    upstream_state_path: str | None = None,
 ) -> Any:
     upstream_manager = UpstreamManager(config.upstreams)
     registry = Registry(upstream_manager)
@@ -121,6 +122,10 @@ def build_app(
         state_path or config.gateways_state_path,
         allowed_upstreams=set(config.upstreams),
     )
+    upstream_store = UpstreamStore(upstream_state_path or config.upstreams_state_path)
+    # Which upstreams the YAML declaring *owned* at startup: those are read-only
+    # at runtime, everything else (persisted runtime ones included) can change.
+    declared_upstreams = set(config.upstreams)
 
     # ---- build every gateway's MCP app before wiring the lifespan ----------
     mounts: list[tuple[str, Any, str]] = []          # (prefix, asgi app, gateway id)
@@ -148,6 +153,9 @@ def build_app(
     # Set below, after the routes are registered. Rotate-key needs it to swap a
     # gateway's expected key in place; declared before so the closure can see it.
     auth_middleware: ApiKeyAuthMiddleware | None = None
+    # Mounted runtime-created MCP servers, by gateway id, so control-plane
+    # mutations (tool_filter edits) can reach the live serving path.
+    runtime_servers: dict[str, GatewayMcpServer] = {}
 
     async def _build_runtime_gateway(gw) -> None:
         """Attach a runtime-created gateway: build, start, mount, register auth.
@@ -183,6 +191,7 @@ def build_app(
 
         app.mount(prefix, RewritePath(mcp_app, "/radar", "/mcp"), name=f"gw-{gw.id}")
         auth_rules.append((prefix, gw.api_key, gw.id))
+        runtime_servers[gw.id] = mcp_server
         log.info("runtime gateway %s mounted at %s", gw.id, prefix)
 
     @contextlib.asynccontextmanager
@@ -203,6 +212,21 @@ def build_app(
                     log.error(
                         "failed to restore runtime gateway %s: %s", managed.id, exc
                     )
+
+            # Restore runtime upstreams (added via the control plane / TUI in an
+            # earlier run) into the live config before the manager starts, so
+            # they connect like YAML-declared ones.
+            upstream_store.load()
+            for managed_up in upstream_store.list():
+                try:
+                    upstream_cfg = UpstreamConfig.from_dict(
+                        managed_up.key, managed_up.spec
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.error("invalid runtime upstream %r: %s", managed_up.key, exc)
+                    continue
+                config.upstreams[managed_up.key] = upstream_cfg
+                store.allowed_upstreams.add(managed_up.key)
 
             log.info(
                 "connecting upstreams: %s",
@@ -264,7 +288,62 @@ def build_app(
         for key in config.upstreams:
             up = upstream_manager.upstream(key)
             tools[key] = sorted(up.tools) if up else []
-        return {"upstreams": upstream_manager.health(), "tools": tools}
+        declared = declared_upstreams
+        health_view = {
+            key: {**state, "source": "config" if key in declared else "runtime"}
+            for key, state in upstream_manager.health().items()
+        }
+        return {"upstreams": health_view, "tools": tools}
+
+    @app.post("/api/v1/upstreams", tags=["control"], status_code=201)
+    async def create_upstream(body: dict[str, Any]) -> Any:
+        """Add and connect an upstream at runtime (persists across restarts)."""
+        key = str(body.get("key") or "").strip()
+        spec: dict[str, Any]
+        if isinstance(body.get("spec"), dict):
+            spec = dict(body["spec"])
+        else:
+            # Flat-body convenience — the shape the TUI sends.
+            spec = {
+                k: v
+                for k, v in body.items()
+                if k != "key" and v not in (None, "", [])        # drop empties
+            }
+        try:
+            managed = upstream_store.create(key=key, spec=spec)
+        except StoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        upstream_cfg = UpstreamConfig.from_dict(managed.key, managed.spec)
+        config.upstreams[managed.key] = upstream_cfg
+        store.allowed_upstreams.add(managed.key)
+        await upstream_manager.register(upstream_cfg)
+        up = upstream_manager.upstream(managed.key)
+        return {
+            "key": managed.key,
+            "source": "runtime",
+            "state": up.status.state if up else "unknown",
+            "tool_count": up.status.tool_count if up else 0,
+            "last_error": up.status.last_error if up else None,
+            "note": "persisted to var/upstreams.json; survives restarts",
+        }
+
+    @app.delete("/api/v1/upstreams/{key}", tags=["control"])
+    async def delete_upstream(key: str) -> Any:
+        if key in declared_upstreams:
+            return JSONResponse(
+                {"error": f"upstream {key!r} is declared in the config file; "
+                          "remove it there rather than at runtime"},
+                status_code=409,
+            )
+        try:
+            upstream_store.delete(key)
+        except StoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        config.upstreams.pop(key, None)
+        store.allowed_upstreams.discard(key)
+        await upstream_manager.remove(key)
+        return {"deleted": key, "note": "disconnected and removed from config"}
 
     @app.post("/api/v1/upstreams/{key}/reconnect", tags=["control"])
     async def reconnect_upstream(key: str) -> Any:
@@ -342,21 +421,31 @@ def build_app(
 
     @app.get("/api/v1/gateways/{gid}/tool-choices", tags=["clients"])
     async def gateway_tool_choices(gid: str) -> Any:
-        """Tools the caller could select when building a gateway."""
+        """Every tool the gateway's upstreams offer, enabled or not.
+
+        Disabled tools are included (flagged ``allowed: false``) so a client
+        can toggle them back on - the gateway filter is only applied to what
+        the gateway *serves*, not to this management view.
+        """
         gw = _lookup(gid)
         if gw is None:
             return JSONResponse({"error": "unknown gateway", "id": gid}, status_code=404)
-        view = registry.resolve(gw)
         by_upstream: dict[str, list[dict[str, Any]]] = {}
-        for tool in sorted(view.tools.values(), key=lambda t: t.qualified_name):
-            by_upstream.setdefault(tool.upstream_key, []).append(
-                {
-                    "name": tool.qualified_name,
-                    "original_name": tool.original_name,
-                    "description": tool.description,
-                    "allowed": match_filter(tool.qualified_name, gw.tool_filter.include).included,
-                }
-            )
+        for upstream_key in sorted(gw.upstreams):
+            up = upstream_manager.upstream(upstream_key)
+            if up is None:
+                continue
+            for tool in sorted(up.tools.values(), key=lambda t: t.qualified_name):
+                by_upstream.setdefault(upstream_key, []).append(
+                    {
+                        "name": tool.qualified_name,
+                        "original_name": tool.original_name,
+                        "description": tool.description,
+                        "allowed": match_filter(
+                            tool.qualified_name, gw.tool_filter.include
+                        ).included,
+                    }
+                )
         return {"gateway": gid, "upstreams": by_upstream}
 
     @app.post("/api/v1/gateways", tags=["gateways"], status_code=201)
@@ -449,6 +538,14 @@ def build_app(
 
     @app.patch("/api/v1/gateways/{gid}", tags=["gateways"])
     async def patch_gateway(gid: str, body: dict[str, Any]) -> Any:
+        if store.get(gid) is None:
+            if _lookup(gid) is not None:
+                return JSONResponse(
+                    {"error": f"gateway {gid!r} is declared in the config file; "
+                              "edit its tool_filter there rather than at runtime"},
+                    status_code=409,
+                )
+            return JSONResponse({"error": f"unknown gateway {gid!r}"}, status_code=404)
         try:
             managed = store.update_tools(
                 gid,
@@ -459,6 +556,14 @@ def build_app(
             )
         except StoreError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+        # Push the fresh definition into the live serving path - the mounted
+        # MCP server captured the config at build time and would otherwise
+        # keep enforcing the old filter until the next restart.
+        live = runtime_servers.get(gid)
+        if live is not None:
+            live.update_config(_managed_to_config(managed, config))
+
         return {"gateway": managed.id, **managed.to_public()}
 
     @app.delete("/api/v1/gateways/{gid}", tags=["gateways"])

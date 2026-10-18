@@ -247,6 +247,7 @@ class ServerConfig:
 
 
 DEFAULT_STATE_PATH = "var/gateways.json"
+DEFAULT_UPSTREAMS_STATE_PATH = "var/upstreams.json"
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,7 @@ class GatewayAppConfig:
     upstreams: dict[str, UpstreamConfig]
     gateways: dict[str, GatewayConfig]
     gateways_state_path: str = DEFAULT_STATE_PATH
+    upstreams_state_path: str = DEFAULT_UPSTREAMS_STATE_PATH
 
     @classmethod
     def load(cls, path: str) -> "GatewayAppConfig":
@@ -310,4 +312,7 @@ class GatewayAppConfig:
             upstreams=upstreams,
             gateways=gateways,
             gateways_state_path=str(raw.get("gateways_state_path", DEFAULT_STATE_PATH)),
+            upstreams_state_path=str(
+                raw.get("upstreams_state_path", DEFAULT_UPSTREAMS_STATE_PATH)
+            ),
         )

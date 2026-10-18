@@ -55,3 +55,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+# Runtime upstream state + TUI e2e artifacts
+var/upstreams.json
+var/upstreams.json.*
+var/tui-*
+var/probe*

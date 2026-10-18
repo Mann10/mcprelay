@@ -75,6 +75,27 @@ class UpstreamManager:
         for up in list(self._upstreams.values()):
             await up.close()
 
+    async def register(self, config: UpstreamConfig, *, connect: bool = True) -> Upstream:
+        """Attach one new upstream at runtime and (optionally) connect it."""
+        self._configs = {**self._configs, config.key: config}
+        upstream = self._upstreams.get(config.key)
+        if upstream is None or upstream.config != config:
+            upstream = Upstream(config)
+            self._upstreams[config.key] = upstream
+        if connect and config.enabled:
+            await upstream.connect()
+        self._ready.set()
+        return upstream
+
+    async def remove(self, key: str) -> bool:
+        """Detach one runtime upstream: disconnect and forget it."""
+        self._configs.pop(key, None)
+        upstream = self._upstreams.pop(key, None)
+        if upstream is None:
+            return False
+        await upstream.close()
+        return True
+
     async def wait_ready(self, timeout: float = 30.0) -> None:
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=timeout)

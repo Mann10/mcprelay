@@ -71,6 +71,52 @@ Endpoints come up on `http://127.0.0.1:8787`:
 
 ---
 
+## The TUI
+
+The terminal UI is the opencode model: one command opens a full-screen app
+that attaches to the gateway running underneath it.
+
+```powershell
+python -m mcprelay          # TUI (default command)
+python -m mcprelay tui -c config.local.yaml
+```
+
+Behaviour:
+
+- **Attaches, never owns.** The TUI is a client of the control plane. If no
+  gateway is healthy it spawns `python -m mcprelay serve` as a detached
+  background process and waits for `/healthz` — exactly how opencode runs a
+  background service that outlives the terminal UI. `--no-spawn` attaches
+  only.
+- **TTY preflight.** Piping stdout fails fast with
+  `error: mcprelay requires a TTY stdout`, before any boot work.
+- Screens (keys are shown in the bottom bar, `?` opens help):
+
+| Key | Screen | It does |
+|---|---|---|
+| `d` | Dashboard | upstream health + gateways + tool counts (`/healthz`) |
+| `u` | Upstreams | per-upstream state, tool inventory, `r` reconnects |
+| `a` | Add upstream | connect a new upstream at runtime — stdio (`npx …`) or remote (`url`, headers); persists to `var/upstreams.json` |
+| `x` | Delete | removes the selected *runtime* upstream / gateway (YAML-declared ones are refused with a hint) |
+| `g` | Gateways | list/open gateways, `x` deletes a runtime gateway |
+| `n` | New gateway | name + upstream keys + allow-list globs; key shown once |
+| `t` | Tools | browse/search the selected gateway's exposed tools |
+| `i` | Install | preview then write an agent config (opencode, claude_code, cursor …) — `ctrl+w` writes |
+
+Upstreams added with `a` are first-class: validated through the same rules as
+the YAML (`transport` whitelist, stdio-command / url requirements, header
+hygiene), connected immediately, persisted across restarts, and selectable by
+newly created gateways. YAML-declared upstreams stay the source of truth —
+the TUI refuses to delete them.
+
+Install writes are the same code path as `python -m mcprelay install`: target
+file is backed up first, preview mode is the default.
+
+Tests: `tests/test_tui_smoke.py` (mocked, offline) and
+`scripts/tui_e2e.py` (drives the real TUI against a running gateway).
+
+---
+
 ## Create a gateway and hand it to an AI coding agent
 
 This is the main flow. Server running in one terminal:

@@ -21,6 +21,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .config import ConfigError, UpstreamConfig
+from .naming import validate_upstream_key
+
 log = logging.getLogger("mcprelay.store")
 
 
@@ -243,3 +246,153 @@ class GatewayStore:
                 gw.description_max_chars = int(description_max_chars)
             self._persist()
             return gw
+
+
+# --------------------------------------------------------------------------
+#                                                          runtime upstreams
+
+
+@dataclass
+class ManagedUpstream:
+    """An upstream added while the server runs (or restored from state)."""
+
+    key: str
+    spec: dict[str, Any]            # exactly the YAML `upstreams:` entry shape
+    created_at: str = ""
+    created_by: str = "control-plane"
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "spec": dict(self.spec),
+            "transport": self.spec.get("transport", "stdio"),
+            "enabled": bool(self.spec.get("enabled", True)),
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+        }
+
+
+class UpstreamStore:
+    """Runtime upstream CRUD in a JSON state file, like ``GatewayStore``.
+
+    ``spec`` is stored verbatim in the YAML entry shape and validated through
+    :meth:`UpstreamConfig.from_dict` on save, so anything that works in the
+    config file also works here - and nothing invalid survives to startup.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = threading.RLock()
+        self._upstreams: dict[str, ManagedUpstream] = {}
+
+    # ------------------------------------------------------------ persistence
+
+    def load(self) -> None:
+        with self._lock:
+            if os.path.exists(self.path):
+                try:
+                    with open(self.path, "r", encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                except json.JSONDecodeError as exc:
+                    log.error(
+                        "upstream state file %s is corrupt (%s); starting empty.",
+                        self.path, exc,
+                    )
+                    payload = {}
+                for raw in payload.get("upstreams", []):
+                    try:
+                        up = ManagedUpstream(**raw)
+                        UpstreamConfig.from_dict(up.key, up.spec)  # validate
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("skipping malformed upstream record %r: %s",
+                                  raw.get("key"), exc)
+                        continue
+                    self._upstreams[up.key] = up
+                log.info(
+                    "loaded %d runtime upstream(s) from %s",
+                    len(self._upstreams), self.path,
+                )
+
+    def _persist(self) -> None:
+        directory = os.path.dirname(os.path.abspath(self.path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        if os.path.exists(self.path):
+            backup = f"{self.path}.bak"
+            with open(self.path, "r", encoding="utf-8") as src:
+                content = src.read()
+            with open(backup, "w", encoding="utf-8") as dst:
+                dst.write(content)
+
+        tmp = f"{self.path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "version": 1,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "upstreams": [asdict(up) for up in self._upstreams.values()],
+                },
+                handle,
+                indent=2,
+            )
+            handle.write("\n")
+        os.replace(tmp, self.path)
+
+    # ------------------------------------------------------------------ CRUD
+
+    def list(self) -> list[ManagedUpstream]:
+        with self._lock:
+            return list(self._upstreams.values())
+
+    def get(self, key: str) -> ManagedUpstream | None:
+        with self._lock:
+            return self._upstreams.get(key)
+
+    def create(self, *, key: str, spec: dict[str, Any],
+               created_by: str = "control-plane") -> ManagedUpstream:
+        """Validate, persist and return one runtime upstream record."""
+        with self._lock:
+            key = (key or "").strip()
+            if not key:
+                raise StoreError("upstream key is required")
+            from .naming import NamingError
+
+            try:
+                validate_upstream_key(key)
+            except NamingError as exc:
+                raise StoreError(str(exc)) from exc
+            if not isinstance(spec, dict):
+                raise StoreError("upstream spec must be an object")
+            # Validate through the config model so YAML rules apply verbatim:
+            # transport whitelist, stdio-command / url requirements, header
+            # hygiene, timeouts.
+            try:
+                UpstreamConfig.from_dict(key, spec)
+            except ConfigError as exc:
+                raise StoreError(str(exc)) from exc
+
+            existing = self._upstreams.get(key)
+            if existing is not None:
+                raise StoreError(f"upstream {key!r} already exists (delete it first)")
+
+            up = ManagedUpstream(
+                key=key,
+                spec=dict(spec),
+                created_at=datetime.now(timezone.utc).isoformat(),
+                created_by=created_by,
+            )
+            self._upstreams[key] = up
+            self._persist()
+            log.info("created runtime upstream %r (%s)", key, spec.get("transport"))
+            return up
+
+    def delete(self, key: str) -> ManagedUpstream:
+        with self._lock:
+            up = self._upstreams.get(key)
+            if up is None:
+                raise StoreError(f"unknown runtime upstream {key!r}")
+            del self._upstreams[key]
+            self._persist()
+            log.info("deleted runtime upstream %r", key)
+            return up
