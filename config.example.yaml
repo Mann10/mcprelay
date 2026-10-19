@@ -36,11 +36,6 @@ upstreams:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-memory"]
 
-  sequential-thinking:
-    transport: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
-
   # Second stdio style: a Python reference server launched with uvx.
   # Requires `uv` on PATH (https://docs.astral.sh/uv/).
   git:

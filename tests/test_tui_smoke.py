@@ -150,6 +150,25 @@ class MockTransport(httpx.AsyncBaseTransport):
             return httpx.Response(200, json={"deleted": key})
         if (method, path) == ("GET", "/api/v1/gateways"):
             return httpx.Response(200, json=GATEWAYS)
+        if (method, path) == ("POST", "/api/v1/gateways"):
+            body = json.loads(request.content)
+            gid = body["name"]
+            upstreams = [str(u) for u in body.get("upstreams", [])]
+            missing = [u for u in upstreams if u not in self.upstreams]
+            if missing:
+                return httpx.Response(400, json={
+                    "error": f"unknown upstream(s): {', '.join(missing)}",
+                })
+            return httpx.Response(201, json={
+                "id": gid,
+                "endpoint": f"/gateway/{gid}/mcp",
+                "radar_endpoint": f"/gateway/{gid}/radar",
+                "upstreams": upstreams,
+                "tool_filter": list(body.get("tool_filter", ["*"])),
+                "tool_count": 7,
+                "source": "runtime",
+                "api_key": "gw_demo_key",
+            })
         if (method, path) == ("GET", "/api/v1/gateways/dev"):
             return httpx.Response(200, json=GATEWAY_DEV)
         if (method, path) == ("GET", "/api/v1/gateways/research"):
@@ -275,14 +294,15 @@ async def main() -> int:
         m_inputs = {i.id: i for i in modal.query(Input)}
         assert "u-key" in m_inputs, list(m_inputs)
         m_inputs["u-key"].value = "secrets"
-        await pilot.press("enter")
-        m_inputs["u-transport"].value = "streamable-http"
-        await pilot.press("enter")
+        await pilot.press("enter")          # focus + open the transport dropdown
+        await pilot.pause(0.3)
+        await pilot.press("down")           # highlight streamable-http
+        await pilot.press("enter")          # confirm -> focus moves to u-url
+        await pilot.pause(0.3)
         m_inputs["u-url"].value = "https://example.invalid/mcp"
-        await pilot.press("enter")          # u-command -> u-url
+        await pilot.press("enter")          # u-url -> u-headers
         # then submit from the last (headers) field to create
         m_inputs["u-headers"].value = ""
-        await pilot.press("enter")          # u-url -> u-headers
         await pilot.press("enter")          # u-headers -> CREATE
         await pilot.pause(0.8)
         # modal gone, back on upstreams scene with new entry highlighted

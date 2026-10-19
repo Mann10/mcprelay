@@ -58,6 +58,20 @@ def _expand_recursive(node: Any) -> Any:
     return node
 
 
+def expand_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Expand ``${env:VAR}`` / ``${VAR:default}`` references in a runtime
+    upstream spec — the same preprocessing the YAML config file gets.
+
+    Runtime (TUI / control-plane) upstreams persist their spec verbatim in
+    ``var/upstreams.json``; references are resolved only when the spec
+    becomes a live :class:`UpstreamConfig`, so secrets never reach disk and
+    a rotated env variable is picked up on reconnect. A reference to a
+    variable that is not set raises :class:`ConfigError` (never silently
+    empty), matching YAML behaviour.
+    """
+    return _expand_recursive(spec)  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class UpstreamConfig:
     """One upstream MCP server the gateway fronts."""

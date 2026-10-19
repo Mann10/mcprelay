@@ -154,10 +154,10 @@ Behaviour:
 |---|---|---|
 | `d` | Dashboard | upstream health + gateways + tool counts (`/healthz`) |
 | `u` | Upstreams | per-upstream state, tool inventory, `r` reconnects |
-| `a` | Add upstream | connect a new upstream at runtime — stdio (`npx …`) or remote (`url`, headers); persists to `var/upstreams.json` |
+| `a` | Add upstream | connect a new upstream at runtime — transport is a dropdown (`stdio` · `streamable-http` · `sse`) and the form adapts to it; persists to `var/upstreams.json` |
 | `x` | Delete | removes the selected *runtime* upstream / gateway (YAML-declared ones are refused with a hint) |
 | `g` | Gateways | list/open gateways, `x` deletes a runtime gateway |
-| `n` | New gateway | name + upstream keys + allow-list globs; key shown once |
+| `n` | New gateway | name + a space-toggle checklist of the available upstreams (extra keys typeable) + allow-list globs; key shown once |
 | `t` | Tools | browse/search the selected gateway's exposed tools |
 | `i` | Install | preview then write an agent config (opencode, claude_code, cursor …) — `ctrl+w` writes |
 

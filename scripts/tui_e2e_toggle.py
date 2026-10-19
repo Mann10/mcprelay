@@ -112,7 +112,9 @@ async def main() -> int:
             tb = app.query_one("#tb-list", ListView)
             rows = [str(s.children[0].content) for s in tb.children]
             assert rows and all("on" in r for r in rows), rows
-            total = created["tool_count"]
+            # every row is toggleable: upstream tools + the built-in search
+            # meta-tool that appears at the top of the browser
+            total = len(list(tb.children))
             assert f"{total}/{total} enabled" in str(app.query_one("#tb-summary").render())
 
             # toggle the target off

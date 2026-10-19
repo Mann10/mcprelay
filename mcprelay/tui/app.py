@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any, ClassVar
 
 from textual import on
@@ -25,7 +26,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, ListItem, ListView, Static
+from textual.widgets import Input, ListItem, ListView, Select, SelectionList, Static
+from textual.widgets.selection_list import Selection
 
 from ..naming import match_filter
 from . import api as relay
@@ -109,6 +111,50 @@ Input {{
 }}
 Input:focus {{ border: round {ACCENT}; }}
 
+Select {{
+    background: {SURFACE};
+    color: {FG};
+    height: auto;
+    margin-bottom: 1;
+    padding: 0;
+    border: none;
+}}
+Select > SelectCurrent {{
+    border: round {BORDER};
+    background: {SURFACE};
+    color: {FG};
+    padding: 0 1;
+}}
+Select:focus > SelectCurrent {{ border: round {ACCENT}; }}
+
+SelectOverlay {{
+    background: {SURFACE2};
+    border: round {ACCENT};
+}}
+SelectOverlay > .option-list--option-highlighted {{
+    background: {ACCENT};
+    color: {SURFACE};
+}}
+
+SelectionList {{
+    border: round {BORDER};
+    background: {SURFACE};
+    color: {FG};
+    height: auto;
+    max-height: 8;
+    margin-bottom: 1;
+    padding: 0 1;
+}}
+SelectionList:focus {{ border: round {ACCENT}; }}
+SelectionList > .selection-list--button {{ background: {SURFACE}; color: {DIM}; }}
+SelectionList > .selection-list--button-highlighted {{ background: {SURFACE2}; color: {FG}; }}
+SelectionList > .selection-list--button-selected {{ background: {SURFACE}; color: {OK}; }}
+SelectionList > .selection-list--button-selected-highlighted {{
+    background: {SURFACE2};
+    color: {OK};
+    text-style: bold;
+}}
+
 ModalScreen {{ background: {SURFACE}; }}
 #modalbody {{ padding: 1 2; }}
 """
@@ -122,6 +168,21 @@ def _state_chip(state: str) -> str:
 def hintline(*pairs: tuple[str, str]) -> str:
     """``r reconnect   esc back`` style bottom-bar content."""
     return "  " + "  ".join(f"[dim]{key}[/] [b]{label}[/]" for key, label in pairs)
+
+
+def shortpath(path: str | None) -> str | None:
+    """Abbreviate a path for display: home becomes ``~`` and slashes unify.
+
+    ``C:\\Users\\me\\.config\\opencode\\opencode.jsonc`` ->
+    ``~/.config/opencode/opencode.jsonc``
+    """
+    if not path:
+        return path
+    p = str(path)
+    home = str(Path.home())
+    if p.lower().startswith(home.lower()):
+        p = "~" + p[len(home):]
+    return p.replace("\\", "/")
 
 
 # -------------------------------------------------------------------- widgets
@@ -401,6 +462,7 @@ class GatewaysScene(Static):
             try:
                 await self.app.client.delete_gateway(gid)
                 self.app.notify(f"deleted {gid}")
+                self.refresh_list()
             except relay.RelayError as exc:
                 self.app.notify(str(exc), severity="error")
 
@@ -652,7 +714,7 @@ class InstallScene(Static):
             return
         rows = [f"[{ACCENT}] clients[/]"]
         for c in clients:
-            path = c.get("default_path") or c.get("path_hint") or "copy manually"
+            path = shortpath(c.get("default_path") or c.get("path_hint") or "copy manually")
             rows.append(f"  {c['client_id']:<18} [dim]{c['display_name']} · {path}[/]")
         self.query_one("#inst-clients", Static).content = "\n".join(rows)
 
@@ -666,9 +728,9 @@ class InstallScene(Static):
         try:
             if write:
                 data = await self.app.client.install_client(gid, client_id, write=True)
-                note = f"[{OK}]WROTE[/] {data.get('path') or '(no default path on this machine)'}"
+                note = f"[{OK}]WROTE[/] {shortpath(data.get('path')) or '(no default path on this machine)'}"
                 if data.get("backup_path"):
-                    note += f"   [dim]backup: {data['backup_path']}[/]"
+                    note += f"   [dim]backup: {shortpath(data['backup_path'])}[/]"
                 output.content = note
             else:
                 data = await self.app.client.client_config(gid, client_id)
@@ -694,21 +756,67 @@ class InstallScene(Static):
 
 
 class CreateGatewayScreen(ModalScreen[dict[str, Any] | None]):
-    """Name + upstream keys + optional tool-filter globs."""
+    """Name + upstream picker + optional tool-filter globs.
 
-    AUTO_FOCUS = "Input"
+    The picker lists every upstream the running control plane knows about,
+    and each is toggled on/off one by one with space. Upstream keys that are
+    not in the list (declared in YAML but absent from health, say) can still
+    be typed manually in ``c-ups-extra``.
+    """
+
+    AUTO_FOCUS = "#c-name"
     BINDINGS: ClassVar = [Binding("escape", "cancel", "close")]
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(f"[{ACCENT}]new gateway[/]", classes="sceneheader"),
             Input(placeholder="name            e.g. dev", id="c-name"),
-            Input(placeholder="upstream keys   comma-separated, e.g. filesystem, github", id="c-ups"),
+            SelectionList(id="c-ups"),
+            Static("[dim]  space toggles a highlighted upstream on/off[/]", id="c-ups-hint"),
+            Input(
+                placeholder="extra keys      optional, comma-separated — upstreams not listed above",
+                id="c-ups-extra",
+            ),
             Input(placeholder="tool filter     globs, e.g. fs.*   (empty = allow *)", id="c-filter"),
             Static("", id="c-note"),
-            Static(hintline(("enter", "create"), ("esc", "cancel")), classes="keyhint"),
+            Static(hintline(("space", "toggle upstream"), ("enter", "create"),
+                            ("esc", "cancel")), classes="keyhint"),
             id="modalbody",
         )
+
+    def on_mount(self) -> None:
+        self.query_one("#c-name", Input).focus()
+        self.app.run_worker(self._load_upstreams(), exclusive=True)
+
+    async def _load_upstreams(self) -> None:
+        """Fill the checklist with the control plane's available upstreams."""
+        listing = self.query_one("#c-ups", SelectionList)
+        note = self.query_one("#c-note", Static)
+        try:
+            data = await self.app.client.upstreams()
+        except Exception as exc:  # noqa: BLE001 - manual entry stays possible
+            note.content = (
+                f"[{BAD}]cannot list upstreams ({str(exc)[:80]}) — "
+                "type upstream keys manually below[/]"
+            )
+            return
+        states: dict[str, Any] = data.get("upstreams") or {}
+        for key in sorted(states):
+            state = (states[key] or {}).get("state", "?")
+            listing.add_option(Selection(f"{key:<18} {state}", key, False))
+        self._prime_list_cursor()
+        if not states:
+            note.content = (
+                f"[{DIM}]no upstreams available yet — press u to add one, "
+                "or type keys manually below[/]"
+            )
+
+    def _prime_list_cursor(self) -> None:
+        """SelectionList's cursor starts at None — space would do nothing.
+        Landing on the first row makes the very first space press toggle."""
+        listing = self.query_one("#c-ups", SelectionList)
+        if listing.options and listing.highlighted is None:
+            listing.highlighted = 0
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -716,17 +824,34 @@ class CreateGatewayScreen(ModalScreen[dict[str, Any] | None]):
     @on(Input.Submitted)
     async def _submitted(self, event: Input.Submitted) -> None:
         inputs = {i.id: i for i in self.query(Input)}
-        order = ["c-name", "c-ups", "c-filter"]
-        position = order.index(event.input.id)
-        if position < len(order) - 1:
-            inputs[order[position + 1]].focus()
-            return
         note = self.query_one("#c-note", Static)
+        if event.input.id == "c-name":
+            self._prime_list_cursor()
+            self.query_one("#c-ups", SelectionList).focus()
+            return
+        if event.input.id == "c-ups-extra":
+            inputs["c-filter"].focus()
+            return
+        # entering on the filter field creates the gateway
         name = inputs["c-name"].value.strip()
-        upstreams = [u.strip() for u in inputs["c-ups"].value.split(",") if u.strip()]
-        tool_filter = [p.strip() for p in inputs["c-filter"].value.split(",") if p.strip()]
+        listing = self.query_one("#c-ups", SelectionList)
+        chosen = [str(v) for v in listing.selected]
+        extra = [
+            u.strip() for u in inputs["c-ups-extra"].value.split(",") if u.strip()
+        ]
+        upstreams: list[str] = []
+        for key in [*chosen, *extra]:
+            if key and key not in upstreams:
+                upstreams.append(key)
+        tool_filter = [
+            p.strip() for p in inputs["c-filter"].value.split(",") if p.strip()
+        ]
         if not name or not upstreams:
-            note.content = f"[{BAD}]name and at least one upstream are required[/]"
+            note.content = (
+                f"[{BAD}]name and at least one upstream are required "
+                "(space toggles a listed upstream; extra keys go in the "
+                "field below)[/]"
+            )
             return
         try:
             created = await self.app.client.create_gateway(
@@ -748,48 +873,94 @@ class CreateGatewayScreen(ModalScreen[dict[str, Any] | None]):
 class CreateUpstreamScreen(ModalScreen[dict[str, Any] | None]):
     """Add one upstream at runtime.
 
-    Fields adapt by transport:
-      * stdio            -> command (with args), optional cwd, env
+    Transport is a dropdown (stdio | streamable-http | sse). The rest of the
+    form adapts to the pick:
+
+      * stdio               -> command (with args)
       * streamable-http/sse -> url, optional headers
     """
 
-    AUTO_FOCUS = "Input"
+    AUTO_FOCUS = "#u-key"
     BINDINGS: ClassVar = [Binding("escape", "cancel", "close")]
+
+    TRANSPORTS: ClassVar[list[tuple[str, str]]] = [
+        ("stdio", "stdio"),
+        ("streamable-http", "streamable-http"),
+        ("sse", "sse"),
+    ]
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(
-                f"[{ACCENT}]add upstream[/]  [dim]transport: stdio (npx …) or "
-                "streamable-http / sse (url)[/]",
+                f"[{ACCENT}]add upstream[/]  [dim]stdio runs a command · "
+                "streamable-http / sse use a url[/]",
                 classes="sceneheader",
             ),
             Input(placeholder="key            e.g. Notion (prefix of tool names)", id="u-key"),
-            Input(placeholder="transport      stdio | streamable-http | sse", id="u-transport"),
+            Select(self.TRANSPORTS, value="stdio", allow_blank=False, id="u-transport"),
             Input(placeholder="command        stdio only, e.g. npx -y @mcp/server", id="u-command"),
             Input(placeholder="url            remote only, e.g. https://…/mcp", id="u-url"),
             Input(placeholder="headers        remote only, e.g. X-API-Key: ${env:NOTION_KEY}", id="u-headers"),
             Static("", id="u-note"),
-            Static(hintline(("enter", "add + connect"), ("esc", "cancel")), classes="keyhint"),
+            Static(
+                hintline(("enter", "open dropdown · continue · add"), ("tab", "keep transport"),
+                         ("esc", "cancel")),
+                classes="keyhint",
+            ),
             id="modalbody",
         )
+
+    @property
+    def _transport(self) -> str:
+        return str(self.query_one("#u-transport", Select).value)
+
+    def on_mount(self) -> None:
+        self._booted = False
+        self._last_transport = self._transport
+        self._sync_fields()
+        self._booted = True
+
+    def _sync_fields(self) -> None:
+        """Show only the fields the chosen transport needs."""
+        remote = self._transport != "stdio"
+        self.query_one("#u-command", Input).display = not remote
+        self.query_one("#u-url", Input).display = remote
+        self.query_one("#u-headers", Input).display = remote
+
+    @on(Select.Changed)
+    def _transport_changed(self, event: Select.Changed) -> None:
+        # Select posts Changed during mount initialization as well; the
+        # value-diff keeps that from yanking focus away from the key field.
+        changed_by_user = self._booted and str(event.value) != self._last_transport
+        self._last_transport = str(event.value)
+        self._sync_fields()
+        if changed_by_user:
+            # the user confirmed a transport from the dropdown — walk into
+            # the first field that transport actually needs
+            nxt = "#u-command" if self._transport == "stdio" else "#u-url"
+            self.query_one(nxt, Input).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     @on(Input.Submitted)
     async def _submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "u-key":
+            select = self.query_one("#u-transport", Select)
+            select.focus()
+            select.action_show_overlay()
+            return
+        fields = ["u-command"] if self._transport == "stdio" else ["u-url", "u-headers"]
+        if event.input.id not in fields:
+            return
         inputs = {i.id: i for i in self.query(Input)}
-        order = ["u-key", "u-transport", "u-command", "u-url", "u-headers"]
-        position = order.index(event.input.id)
-        if position < len(order) - 1:
-            inputs[order[position + 1]].focus()
+        position = fields.index(event.input.id)
+        if position < len(fields) - 1:
+            inputs[fields[position + 1]].focus()
             return
         note = self.query_one("#u-note", Static)
         key = inputs["u-key"].value.strip()
-        transport = inputs["u-transport"].value.strip() or "stdio"
-        if transport not in ("stdio", "streamable-http", "sse"):
-            note.content = f"[{BAD}]transport must be stdio, streamable-http or sse[/]"
-            return
+        transport = self._transport
         spec: dict[str, Any] = {"transport": transport}
         if transport == "stdio":
             command = inputs["u-command"].value.strip()

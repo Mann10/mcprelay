@@ -103,15 +103,16 @@ async def main() -> int:
             m = {i.id: i for i in modal.query(Input)}
             assert "u-key" in m, list(m)
             m["u-key"].value = KEY
-            await pilot.press("enter")
-            m["u-transport"].value = "stdio"
-            await pilot.press("enter")
+            await pilot.press("enter")   # -> transport dropdown opens
+            await pilot.pause(0.3)
+            await pilot.press("enter")   # keep stdio highlighted (dropdown closes)
+            await pilot.pause(0.3)
+            await pilot.press("tab")     # keep-transport advance -> u-command
+            await pilot.pause(0.3)
             m["u-command"].value = (
                 "npx -y @modelcontextprotocol/server-filesystem C:/personal"
             )
-            await pilot.press("enter")      # -> url
-            await pilot.press("enter")      # -> headers
-            await pilot.press("enter")      # CREATE (last field)
+            await pilot.press("enter")      # u-command -> CREATE (stdio has one field)
             await pilot.pause(15.0)         # npx spawn + handshake
 
             print("after add: scene",

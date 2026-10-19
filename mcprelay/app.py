@@ -24,7 +24,14 @@ from starlette.responses import JSONResponse as StarletteJSONResponse
 
 from . import agentconfig
 from .auth import ApiKeyAuthMiddleware
-from .config import GatewayAppConfig, GatewayConfig, UpstreamConfig, ToolFilterConfig
+from .config import (
+    ConfigError,
+    GatewayAppConfig,
+    GatewayConfig,
+    ToolFilterConfig,
+    UpstreamConfig,
+    expand_spec,
+)
 from .mcp_server import SEARCH_TOOL_NAME, GatewayMcpServer
 from .naming import match_filter
 from .registry import Registry, UpstreamManager, to_wire_tool
@@ -215,12 +222,15 @@ def build_app(
 
             # Restore runtime upstreams (added via the control plane / TUI in an
             # earlier run) into the live config before the manager starts, so
-            # they connect like YAML-declared ones.
+            # they connect like YAML-declared ones. References are resolved
+            # here, at connect time — the stored spec keeps ${env:...} form,
+            # so secrets stay out of var/upstreams.json and rotating a
+            # variable takes effect on the next restart.
             upstream_store.load()
             for managed_up in upstream_store.list():
                 try:
                     upstream_cfg = UpstreamConfig.from_dict(
-                        managed_up.key, managed_up.spec
+                        managed_up.key, expand_spec(managed_up.spec)
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.error("invalid runtime upstream %r: %s", managed_up.key, exc)
@@ -310,11 +320,23 @@ def build_app(
                 if k != "key" and v not in (None, "", [])        # drop empties
             }
         try:
+            # Resolve ${env:VAR} references before anything is validated or
+            # persisted: a missing variable is a 400 with the exact name,
+            # and no broken spec ever reaches var/upstreams.json. The
+            # *original* spec (references intact) is what gets stored —
+            # secrets stay out of the file and rotation works on reconnect.
+            resolved_spec = expand_spec(spec)
+        except ConfigError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
             managed = upstream_store.create(key=key, spec=spec)
         except StoreError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
-        upstream_cfg = UpstreamConfig.from_dict(managed.key, managed.spec)
+        try:
+            upstream_cfg = UpstreamConfig.from_dict(managed.key, resolved_spec)
+        except ConfigError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         config.upstreams[managed.key] = upstream_cfg
         store.allowed_upstreams.add(managed.key)
         await upstream_manager.register(upstream_cfg)
