@@ -1,4 +1,4 @@
-# mcprelay — a local MCP gateway
+# mcprelay is a local MCP gateway
 
 A config-driven gateway that aggregates several upstream MCP servers behind one
 endpoint, namespaces their tools, enforces a per-gateway allow-list, and speaks
